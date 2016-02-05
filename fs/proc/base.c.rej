@@ -1,0 +1,98 @@
+--- fs/proc/base.c
++++ fs/proc/base.c
+@@ -220,16 +178,23 @@ struct mm_struct *mm_for_maps(struct task_struct *task)
+ 		return ERR_PTR(err);
+ 
+ 	mm = get_task_mm(task);
+-	if (mm && mm != current->mm &&
+-			!ptrace_may_access(task, PTRACE_MODE_READ)) {
+-		mmput(mm);
+-		mm = ERR_PTR(-EACCES);
++	if (mm) {
++		if ((mm != current->mm && !ptrace_may_access(task, mode)) ||
++		    (gr_handle_proc_ptrace(task) || gr_acl_handle_procpidmem(task))) {
++			mmput(mm);
++			mm = ERR_PTR(-EACCES);
++		}
+ 	}
+ 	mutex_unlock(&task->signal->cred_guard_mutex);
+ 
+ 	return mm;
+ }
+ 
++struct mm_struct *mm_for_maps(struct task_struct *task)
++{
++	return mm_access(task, PTRACE_MODE_READ);
++}
++
+ static int proc_pid_cmdline(struct task_struct *task, char * buffer)
+ {
+ 	int res = 0;
+@@ -855,42 +843,28 @@ static ssize_t mem_read(struct file * file, char __user * buf,
+ 	}
+ 	*ppos = src;
+ 
+-out_put:
+-	mmput(mm);
+-out_free:
+ 	free_page((unsigned long) page);
+-out:
+-	put_task_struct(task);
+-out_no_task:
+ 	return ret;
+ }
+ 
++#define mem_write NULL
++
++#ifndef mem_write
++/* They were right the first time */
+ static ssize_t mem_write(struct file * file, const char __user *buf,
+ 			 size_t count, loff_t *ppos)
+ {
+ 	int copied;
+ 	char *page;
+-	struct task_struct *task = get_proc_task(file->f_path.dentry->d_inode);
+ 	unsigned long dst = *ppos;
+-	struct mm_struct *mm;
++	struct mm_struct *mm = file->private_data;
+ 
+-	copied = -ESRCH;
+-	if (!task)
+-		goto out_no_task;
++	if (!mm)
++		return 0;
+ 
+-	copied = -ENOMEM;
+ 	page = (char *)__get_free_page(GFP_TEMPORARY);
+ 	if (!page)
+-		goto out_task;
+-
+-	mm = check_mem_permission(task);
+-	copied = PTR_ERR(mm);
+-	if (IS_ERR(mm))
+-		goto out_free;
+-
+-	copied = -EIO;
+-	if (file->private_data != (void *)((long)current->self_exec_id))
+-		goto out_mm;
++		return -ENOMEM;
+ 
+ 	copied = 0;
+ 	while (count > 0) {
+@@ -914,15 +888,10 @@ static ssize_t mem_write(struct file * file, const char __user *buf,
+ 	}
+ 	*ppos = dst;
+ 
+-out_mm:
+-	mmput(mm);
+-out_free:
+ 	free_page((unsigned long) page);
+-out_task:
+-	put_task_struct(task);
+-out_no_task:
+ 	return copied;
+ }
++#endif
+ 
+ loff_t mem_lseek(struct file *file, loff_t offset, int orig)
+ {
